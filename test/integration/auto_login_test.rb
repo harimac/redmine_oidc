@@ -16,11 +16,10 @@ class RedmineOidcAutoLoginTest < Redmine::IntegrationTest
     }
   end
 
-  def test_login_page_includes_auto_login_redirect_when_enabled
+  def test_login_page_redirects_to_oidc_when_auto_login_is_enabled
     get '/login', params: {back_url: '/my/page'}
 
-    assert_response :success
-    assert_select 'meta[http-equiv=?][content=?]', 'refresh', '0;url=/oidc/authorize?back_url=%2Fmy%2Fpage'
+    assert_redirected_to '/oidc/authorize?back_url=%2Fmy%2Fpage'
   end
 
   def test_local_login_param_bypasses_auto_login_redirect

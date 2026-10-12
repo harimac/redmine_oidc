@@ -47,7 +47,9 @@ After linking, the issuer and user ID are shown with an option to unlink.
 - Ruby 2.7+
 - OIDC provider that supports Discovery (`/.well-known/openid-configuration`)
 
-No additional gem dependencies are required. The plugin uses Ruby's built-in `net/http` for all HTTP requests.
+The plugin uses Ruby's built-in `net/http` for HTTP requests and the `jwt` gem
+for Entra ID token verification. Run `bundle install` from the Redmine root
+after installing or upgrading the plugin.
 
 ## Compatibility
 
@@ -126,6 +128,22 @@ https://your-redmine.example.com/login?local_login=1
 2. Add your callback URL as a Redirect URI (Web platform)
 3. In plugin settings, set Issuer URL to `https://login.microsoftonline.com/{tenant-id}/v2.0`
 
+Use your tenant's ID, not `common` or `organizations`. Entra ID sign-ins verify
+the ID token's RS256 signature against the discovery JWKS, issuer, audience,
+expiry, issued-at/not-before times, authorized party (when present), and the
+session nonce. The UserInfo subject must match the verified ID token subject.
+
+For new accounts, the login ID is exactly the part of the verified ID token's
+`preferred_username` before `@`. The UserInfo email remains the account email.
+The login is not sanitized, shortened, or given a numeric suffix: missing or
+invalid usernames, Redmine validation errors, and existing login IDs stop
+registration with an error. Existing issuer/subject links and enabled email
+matching run first, even when that login ID already exists. Existing accounts'
+login IDs are not changed. Other providers keep their email-based login naming.
+
+An account is matched by its OIDC link or the enabled email matching feature;
+`preferred_username` is only used to name a new account.
+
 </details>
 
 <details>
@@ -188,6 +206,19 @@ When an admin changes the OIDC provider (updates the Issuer URL in plugin settin
    ```
 
 3. Restart Redmine.
+
+## Tests
+
+From a configured Redmine checkout with this plugin installed and its test
+database prepared:
+
+```bash
+bundle exec rake redmine:plugins:test NAME=redmine_oidc RAILS_ENV=test
+```
+
+The suite covers token verification, registration, email/link matching order,
+login collisions, and rollback if the OIDC link cannot be saved, alongside the
+existing login and auto-login tests.
 
 ## License
 
