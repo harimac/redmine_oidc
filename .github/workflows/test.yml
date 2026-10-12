@@ -12,17 +12,25 @@ permissions:
 jobs:
   redmine:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - redmine: 5.1-stable
+            ruby: '3.2'
+          - redmine: 6.0-stable
+            ruby: '3.3'
     steps:
       - uses: actions/checkout@v4
         with:
           repository: redmine/redmine
-          ref: 6.0-stable
+          ref: ${{ matrix.redmine }}
       - uses: actions/checkout@v4
         with:
           path: plugins/redmine_oidc
       - uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.3'
+          ruby-version: ${{ matrix.ruby }}
       - name: Configure test database
         run: |
           printf 'test:\n  adapter: sqlite3\n  database: db/oidc_test.sqlite3\n' > config/database.yml
