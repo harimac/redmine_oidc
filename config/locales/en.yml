@@ -64,3 +64,5 @@ en:
   oidc_error_no_matching_user: "No matching Redmine account was found. Please contact your administrator."
   oidc_error_user_inactive: "Your account is not active. Please contact your administrator."
   oidc_error_auto_register_failed: "Automatic account creation failed. Please contact your administrator."
+  oidc_error_login_taken: "Automatic account creation stopped: the login ID belongs to an existing account. Please contact your administrator."
+  oidc_error_invalid_preferred_username: "Automatic account creation stopped: the verified ID token has no valid preferred_username. Please contact your administrator."

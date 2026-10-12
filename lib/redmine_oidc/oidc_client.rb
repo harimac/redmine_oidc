@@ -1,6 +1,7 @@
 require 'net/http'
 require 'json'
 require 'uri'
+require 'jwt'
 
 module RedmineOidc
   class OidcClient
@@ -24,7 +25,12 @@ module RedmineOidc
       @discovery ||= fetch_json("#{@issuer_url}/.well-known/openid-configuration")
     end
 
-    def authorization_url(redirect_uri:, state:)
+    def entra_id?
+      uri = URI.parse(@issuer_url)
+      uri.scheme == 'https' && uri.host == 'login.microsoftonline.com'
+    end
+
+    def authorization_url(redirect_uri:, state:, nonce: nil)
       params = {
         response_type: 'code',
         client_id:     @client_id,
@@ -32,7 +38,37 @@ module RedmineOidc
         scope:         @scopes,
         state:         state
       }
+      params[:nonce] = nonce if nonce
       "#{discovery['authorization_endpoint']}?#{URI.encode_www_form(params)}"
+    end
+
+    # Only use claims after verifying the signature with the provider's JWKS.
+    # Entra must use a tenant-specific v2 issuer (not common/organizations).
+    def verified_id_token(token, nonce:)
+      raise JWT::DecodeError, 'Missing ID token or nonce' if token.to_s.empty? || nonce.to_s.empty?
+      raise JWT::DecodeError, 'Discovery issuer mismatch' unless discovery['issuer'] == @issuer_url
+      jwks_uri = URI.parse(discovery.fetch('jwks_uri'))
+      raise JWT::DecodeError, 'JWKS must use HTTPS' unless jwks_uri.scheme == 'https'
+
+      jwks = fetch_json(jwks_uri.to_s)
+      signing_keys = jwks.fetch('keys').select do |key|
+        key['kty'] == 'RSA' && (!key['use'] || key['use'] == 'sig') &&
+          (!key['alg'] || key['alg'] == 'RS256') &&
+          (!key['key_ops'] || key['key_ops'].include?('verify'))
+      end
+      claims, = JWT.decode(token, nil, true,
+        algorithms: ['RS256'], jwks: {keys: signing_keys},
+        iss: @issuer_url, verify_iss: true,
+        aud: @client_id, verify_aud: true,
+        verify_expiration: true, verify_not_before: true, verify_iat: true,
+        required_claims: %w[iss sub aud exp iat nonce])
+      raise JWT::DecodeError, 'Nonce mismatch' unless claims['nonce'] == nonce
+      audiences = Array(claims['aud'])
+      if (audiences.length > 1 || claims.key?('azp')) && claims['azp'] != @client_id
+        raise JWT::DecodeError, 'Authorized party mismatch'
+      end
+      raise JWT::DecodeError, 'Missing subject' unless claims['sub'].is_a?(String) && !claims['sub'].empty?
+      claims
     end
 
     def exchange_code(code, redirect_uri:)

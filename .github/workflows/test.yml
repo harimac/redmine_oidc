@@ -1,0 +1,36 @@
+name: Plugin tests
+
+on:
+  push:
+    branches: [feat/entra-preferred-username-login]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  redmine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: redmine/redmine
+          ref: 6.0-stable
+      - uses: actions/checkout@v4
+        with:
+          path: plugins/redmine_oidc
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+      - name: Configure test database
+        run: |
+          printf 'test:\n  adapter: sqlite3\n  database: db/oidc_test.sqlite3\n' > config/database.yml
+          bundle config set without 'development minimagick common_mark'
+          bundle install
+      - name: Prepare database and test plugin
+        env:
+          RAILS_ENV: test
+        run: |
+          bundle exec rake db:migrate redmine:plugins:migrate
+          bundle exec rake redmine:plugins:test NAME=redmine_oidc

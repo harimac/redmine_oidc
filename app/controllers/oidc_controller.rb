@@ -17,6 +17,8 @@ class OidcController < ApplicationController
 
     state = SecureRandom.hex(32)
     session[:oidc_state] = state
+    nonce = SecureRandom.hex(32)
+    session[:oidc_nonce] = nonce
     session[:oidc_back_url] = params[:back_url] if params[:back_url].present?
 
     if User.current.logged?
@@ -26,7 +28,8 @@ class OidcController < ApplicationController
     begin
       url = client.authorization_url(
         redirect_uri: oidc_callback_url,
-        state:        state
+        state:        state,
+        nonce:        nonce
       )
       redirect_to url, allow_other_host: true
     rescue => e
@@ -41,6 +44,7 @@ class OidcController < ApplicationController
 
     # Verify state
     expected_state = session.delete(:oidc_state)
+    expected_nonce = session.delete(:oidc_nonce)
     if expected_state.blank? || params[:state] != expected_state
       flash[:error] = l(:oidc_error_invalid_state)
       redirect_to login_redirect_path
@@ -74,6 +78,11 @@ class OidcController < ApplicationController
       uid = userinfo['sub']
       email = userinfo['email']
       issuer = client.issuer_url
+      id_claims = nil
+      if client.entra_id?
+        id_claims = client.verified_id_token(token_data['id_token'], nonce: expected_nonce)
+        raise JWT::DecodeError, 'UserInfo subject mismatch' unless id_claims['sub'] == uid
+      end
 
       unless uid.present?
         flash[:error] = l(:oidc_error_missing_sub)
@@ -87,7 +96,7 @@ class OidcController < ApplicationController
       if link_mode && User.current.logged?
         handle_link_mode(User.current, issuer, uid)
       else
-        handle_login_mode(client, userinfo, issuer, uid, email, back_url)
+        handle_login_mode(client, userinfo, issuer, uid, email, back_url, id_claims)
       end
     rescue => e
       Rails.logger.error "OIDC callback error: #{e.class} - #{e.message}\n#{e.backtrace&.first(5)&.join("\n")}"
@@ -149,7 +158,7 @@ class OidcController < ApplicationController
     redirect_to my_account_path
   end
 
-  def handle_login_mode(client, userinfo, issuer, uid, email, back_url)
+  def handle_login_mode(client, userinfo, issuer, uid, email, back_url, id_claims = nil)
     settings = Setting.plugin_redmine_oidc || {}
 
     # 1. Look up by issuer + uid link
@@ -167,7 +176,22 @@ class OidcController < ApplicationController
 
     # 3. Auto-registration
     if user.nil? && settings['auto_registration'] == '1' && email.present?
-      user = auto_register_user(userinfo, issuer, uid, email)
+      login = if client.entra_id?
+                preferred_username_login(id_claims && id_claims['preferred_username'])
+              else
+                derive_login(email)
+              end
+      if login.blank?
+        flash[:error] = l(:oidc_error_invalid_preferred_username)
+        redirect_to login_redirect_path
+        return
+      end
+      if User.find_by_login(login)
+        flash[:error] = l(:oidc_error_login_taken)
+        redirect_to login_redirect_path
+        return
+      end
+      user = auto_register_user(userinfo, issuer, uid, email, login)
       unless user&.persisted?
         flash[:error] = l(:oidc_error_auto_register_failed)
         redirect_to login_redirect_path
@@ -192,8 +216,7 @@ class OidcController < ApplicationController
     successful_authentication(user)
   end
 
-  def auto_register_user(userinfo, issuer, uid, email)
-    login = derive_login(email)
+  def auto_register_user(userinfo, issuer, uid, email, login)
     firstname = userinfo['given_name'].presence || userinfo['name'].to_s.split(' ', 2).first.presence || login
     lastname = userinfo['family_name'].presence || userinfo['name'].to_s.split(' ', 2).last.presence || '-'
 
@@ -208,13 +231,22 @@ class OidcController < ApplicationController
     user.activate
     user.last_login_on = Time.now
 
-    if user.save
-      OidcUserLink.create(user: user, issuer: issuer, uid: uid)
-      user
-    else
-      Rails.logger.error "OIDC auto-registration failed for #{email}: #{user.errors.full_messages.join(', ')}"
-      nil
+    User.transaction do
+      user.save!
+      OidcUserLink.create!(user: user, issuer: issuer, uid: uid)
     end
+    user
+  rescue ActiveRecord::RecordInvalid, ActiveRecord::RecordNotUnique => e
+    Rails.logger.error "OIDC auto-registration failed: #{e.class}"
+    nil
+  end
+
+  def preferred_username_login(preferred_username)
+    return nil unless preferred_username.is_a?(String)
+    login, domain = preferred_username.split('@', 2)
+    return nil if login.blank? || domain.blank?
+    # Preserve the exact local part; Redmine validates its characters/length.
+    login
   end
 
   def derive_login(email)
